@@ -76,8 +76,9 @@ CHECK_ARGS = {
 def parse_tool_calls(text):
     calls = []
     for m in re.findall(r'<tool_call>(.*?)</tool_call>', text, re.DOTALL):
-        try: calls.append(json.loads(m.strip()))
-        except: pass
+        try: call = json.loads(m.strip())
+        except: continue
+        if isinstance(call, dict): calls.append(call)
     return calls
 
 def execute_tool(name, args):
@@ -132,6 +133,7 @@ def rollout_single(rollout_engine, tokenizer, messages, tools, max_turns=3, max_
             if isinstance(raw, str):
                 try: raw = json.loads(raw)
                 except: raw = {}
+            if not isinstance(raw, dict): raw = {}
             result = execute_tool(name, raw)
             result_str = (json.dumps(result, ensure_ascii=False) if result else '{"error": "tool not found"}')[:2048]  # 防止天文数字撑爆tokenizer
             messages.append({"role": "tool", "content": result_str})
@@ -225,6 +227,7 @@ def calculate_rewards(prompts, completions, gt_batch, tools_batch, num_gen, rewa
                 if isinstance(raw, str):
                     try: raw = json.loads(raw)
                     except: raw = {}
+                if not isinstance(raw, dict): raw = {}
                 check = CHECK_ARGS.get(name)
                 valid_call_count += int(bool(name in valid_names and check and check(raw)))
             tool_gap = abs(valid_call_count - len(gt)) + max(0, len(tool_calls) - valid_call_count)  # tool数差值
@@ -240,12 +243,10 @@ def calculate_rewards(prompts, completions, gt_batch, tools_batch, num_gen, rewa
 
 # ================================ 工具与 Reward = End ================================
 def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model=None, start_step=0, wandb=None, use_sglang=False):
-    last_step = start_step
     for step, batch in enumerate(loader, start=start_step + 1):
         messages_batch = batch['messages']
         tools_batch = batch['tools']
         gt_batch = batch['gt']
-        last_step = step
 
         with torch.no_grad():
             completions, contexts, prompt_ids_batch, response_ids_batch, response_masks_batch, response_old_logps_batch, turn_outputs_batch, unfinished_batch = rollout_batch(rollout_engine, tokenizer, messages_batch, tools_batch, args.num_generations, max_turns=3, max_new_tokens=args.max_gen_len, thinking_ratio=args.thinking_ratio, device=args.device)
@@ -331,7 +332,7 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
         loss = (policy_loss + aux_loss) / args.accumulation_steps
         loss.backward()
 
-        if step % args.accumulation_steps == 0:
+        if step % args.accumulation_steps == 0 or step == iters:
             if args.grad_clip > 0: torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step(); scheduler.step(); optimizer.zero_grad()
 
@@ -364,10 +365,6 @@ def rl_train_epoch(epoch, loader, iters, rollout_engine, ref_model, reward_model
 
         del per_token_logps, ref_per_token_logps
         del completions, rewards, grouped_rewards, mean_r, std_r, advantages, completion_mask
-
-    if last_step > start_step and last_step % args.accumulation_steps != 0:
-        if args.grad_clip > 0: torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-        optimizer.step(); scheduler.step(); optimizer.zero_grad()
 
 
 if __name__ == "__main__":
